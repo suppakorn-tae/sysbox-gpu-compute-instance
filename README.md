@@ -19,13 +19,13 @@ images/
 manifests/
   pod.yaml                CPU / HAMi-era example
   pod-gpu-fraction-sm.yaml    Sysbox + KAI fraction + SM cap example
-node-setup/               Sysbox install + nvidia-sysbox runtime for RKE2
+node-setup/               Sysbox + nvidia-sysbox runtime, KAI queues, gpu-fractioning (fork) Helm values
 testing/
   gpu-memory-quota/       HAMi-era GPU memory stress test
   gpu-fractioning/        probes and churn scripts used in the GPU fractioning report
 ```
 
-## Tested stack (2026-11-13)
+## Tested stack (2026-11-14)
 
 Ubuntu 24.04.5 / kernel 6.8.0-147 · RKE2 v1.36.5+rke2r1 · containerd 2.3.4 · Sysbox CE 0.7.1 ·
 NVIDIA driver 615.71.09 (CUDA 13.4) · GPU Operator v26.7.1 · Container Toolkit 1.20.1 ·
