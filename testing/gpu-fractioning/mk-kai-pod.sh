@@ -6,11 +6,11 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: $NAME
-  namespace: runai-llm-team
-  labels: {project: llm-team, app: frac-probe}
+  namespace: ${TEST_NS:-ci-tenants}
+  labels: {kai.scheduler/queue: ${QUEUE:-tenants}, app: frac-probe}
   annotations: {${ANN}}
 spec:
-  schedulerName: runai-scheduler
+  schedulerName: ${SCHED:-kai-scheduler}
   restartPolicy: Never
   $( [ -n "$RC" ] && echo "runtimeClassName: $RC" )
   $( [[ "$RC" == *sysbox* ]] && echo "hostUsers: false" )

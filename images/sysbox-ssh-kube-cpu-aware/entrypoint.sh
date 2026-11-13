@@ -99,12 +99,20 @@ fi
 
 chmod 0644 /etc/profile.d/compute-env.sh
 
-# HAMi vGPU enforcement variables
+# GPU-sharing variables to carry into SSH/PAM sessions (which do not inherit
+# the container's env). HAMi's, and KAI gpu-fractioning's: with sm-limit the
+# MPS pipe directory is the container's own MPS namespace (/tmp/nvidia-mps);
+# a session without it would skip MPS and be killed by the enforcer.
 hami_vars=(
     CUDA_DEVICE_MEMORY_LIMIT_0
     CUDA_DEVICE_MEMORY_SHARED_CACHE
     CUDA_DEVICE_SM_LIMIT
     LIBCUDA_LOG_LEVEL
+    CUDA_MPS_PIPE_DIRECTORY
+    NVIDIA_GPU_MEMORY_LIMIT
+    NVIDIA_GPU_MEMORY_REQUEST
+    NVIDIA_VISIBLE_DEVICES
+    NVIDIA_DRIVER_CAPABILITIES
 )
 while IFS= read -r v; do
     [[ -n "$v" ]] && hami_vars+=("$v")
@@ -135,6 +143,9 @@ _show_limits() {
     fi
     if [ -n "${CUDA_DEVICE_MEMORY_LIMIT_0:-}" ]; then
         printf '│  GPU mem limit : %-27s│\n' "${CUDA_DEVICE_MEMORY_LIMIT_0}"
+    fi
+    if [ -n "${NVIDIA_GPU_MEMORY_LIMIT:-}" ]; then
+        printf '│  GPU memory : %-30s│\n' "${NVIDIA_GPU_MEMORY_LIMIT} MiB"
     fi
     echo "└──────────────────────────────────────────────┘"
 }

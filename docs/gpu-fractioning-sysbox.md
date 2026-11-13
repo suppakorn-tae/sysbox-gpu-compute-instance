@@ -1,30 +1,34 @@
 # GPU Fractioning for Sysbox Compute Instances
 
-> Test report and design, based on experiments on node `dev03`, 2026-11-13.
-> Status: **prototype**. It works and has been measured, but it is not production-hardened (see [§9 Known issues](#9-known-issues)).
+> Test report and design, based on work on node `dev03`, 2026-11-13/14.
+> Status: **working prototype**, deployed on dev03 and measured. Single-GPU node only.
 
 ---
 
 ## 1. Summary
 
-The goal was to give each Sysbox-based Compute Instance a **fraction of one GPU** with both a **memory** limit and a **compute** limit that a root user inside the instance cannot raise.
+Goal: give each Sysbox Compute Instance a **fraction of one GPU**, with a **memory** limit and a **compute** limit that root inside the instance cannot raise.
 
 | Question | Answer |
 |---|---|
-| Does Sysbox work with GPU fractioning? | **Yes**, through a chained runtime (`nvidia-sysbox`). Plain `sysbox-runc` gets no GPU. |
-| Memory limit | **Yes.** KAI `gpu-fraction` / `gpu-memory`, 1 MiB granularity, enforced on the host side (root inside the container cannot bypass it). |
-| Compute limit, out of the box | **No.** Run:ai 3.0 `NvFractions` caps memory only. Under contention the GPU is split evenly regardless of fraction. |
-| Compute limit, with `gpu-sm-agent` (this repo) | **Yes.** MPS protocol-3 namespaces with a host-set SM percentage, about 1 SM per 1 %. Verified 1:3 split under contention. |
-| Can root inside Sysbox get around it? | Overriding env vars or limits: no. Skipping MPS or joining another namespace: the agent kills the process within ~0.5–1 s. |
-| Open bug | Under Sysbox, KAI's memory accounting sometimes applies **another pod's** memory limit (6 of 56 pods in fast churn tests). The agent prevents *over*-allocation, but can't prevent *under*-allocation. See [§9.1](#91-kai-memacct-applies-a-stale-memory-limit-under-sysbox). |
+| Stack | Upstream **KAI-Scheduler v0.18.3** (Run:ai removed) + a **private fork of KAI's gpu-fractioning** ([suppakorn-tae/gpu-fractioning](https://github.com/suppakorn-tae/gpu-fractioning), branch `sysbox-sm-limit`, based on v0.1.6). |
+| Memory limit | ✅ Exact: `gpu-fraction` 0.25 → 10.0 GiB reported, 9.9 GiB usable. 12/12 pods exact in churn (upstream under Sysbox: up to 6/12 wrong, some over-allocated). |
+| Compute limit | ✅ Same annotation: 0.25 → 26 of 108 SMs. 0.25 vs 0.75 at the same time: 30.2 vs 91.6 TFLOPS (1 : 3). |
+| Can a tenant opt out or raise it? | No. `gpu-compute.mode` is ignored (enforced); `gpu-sm-percent` can only lower the share. |
+| Can root inside the instance get around it? | Skipping MPS → process killed within ~0.5 s. Changing MPS settings → refused (needs host UID 0; Sysbox maps container root elsewhere). |
+| What can a tenant see? | Only its own MPS namespace socket. Not the node's MPS control socket, other tenants' sockets, or the daemons' directories. It can still *list* the shared server's namespaces (opaque names, SM %, memory). |
+| Works in the real instance image (systemd + SSH)? | ✅ A login session gets the MPS pipe and memory limit; a CUDA program compiled in the image sees 26 SMs / 10 GiB. |
 
-Recommended stack for a GPU Compute Instance:
+Pod spec needed per instance (full example: [`manifests/pod-gpu-fraction-sm.yaml`](../manifests/pod-gpu-fraction-sm.yaml)):
 
-```
-memory   : KAI gpu-fraction / gpu-memory           (driver-side memacct, exact reported size)
-compute  : gpu-sm-agent → MPS namespace per pod    (active-thread-percentage, host-set)
-runtime  : RuntimeClass nvidia-sysbox, hostUsers: false
-scheduler: runai-scheduler (KAI), Run:ai project namespace
+```yaml
+metadata:
+  labels: {kai.scheduler/queue: tenants}
+  annotations: {gpu-fraction: "0.25"}       # optional: gpu-sm-percent: "20"
+spec:
+  schedulerName: kai-scheduler
+  runtimeClassName: nvidia-sysbox
+  hostUsers: false
 ```
 
 ---
@@ -35,311 +39,145 @@ scheduler: runai-scheduler (KAI), Run:ai project namespace
 |---|---|
 | OS / kernel | Ubuntu 24.04.5 LTS / 6.8.0-147-generic |
 | Kubernetes | RKE2 v1.36.5+rke2r1 |
-| containerd | 2.3.4-k3s1 (NRI enabled, config version 3) |
-| GPU | 1× NVIDIA A100-SXM4-40GB (108 SMs, 40960 MiB, VBIOS 92.00.45.00.03), MIG disabled |
-| NVIDIA driver | 615.71.09 (CUDA UMD 13.4) |
-| CUDA MPS control | binary version 13040, protocol 3 |
-| NVIDIA GPU Operator | v26.7.1 |
-| NVIDIA Container Toolkit | 1.20.1 (CDI mode) |
-| NVIDIA device plugin / GFD | v0.20.1 |
-| DCGM exporter | 4.6.1-4.8.4 |
-| MIG manager | v0.15.1 |
-| Run:ai (self-hosted) | 3.0.20 |
-| KAI scheduler (scheduler, binder, admission, operators) | v0.18.3 |
-| KAI gpu-fractioning (operator, fractiond, mpsd, metricsd) | v0.1.6 |
-| Sysbox CE | 0.7.1 (commit 081856cc5d17e7095f066b08d0eca6bb0b515c47) |
-| Test image | `nvcr.io/nvidia/pytorch:26.09-py3` (torch 2.14.0a0+b2c75dd062.nv26.09, CUDA 13.4.1) |
-| Probe workload | fp32 `torch.mm`, 8192×8192, looped for 20 s |
+| containerd | 2.3.4-k3s1 (NRI enabled, config v3) |
+| GPU | 1× NVIDIA A100-SXM4-40GB (108 SMs, 40960 MiB), MIG disabled |
+| NVIDIA driver | 615.71.09 (CUDA 13.4), MPS control protocol 3 |
+| NVIDIA GPU Operator | v26.7.1 (Container Toolkit 1.20.1, CDI mode; device plugin / GFD v0.20.1) |
+| Sysbox CE | 0.7.1 (`nvidia-sysbox` runtime, see [`node-setup/`](../node-setup/)) |
+| KAI-Scheduler | v0.18.3, Helm `kai-scheduler` in ns `kai-scheduler`, `global.gpuSharingMode=NvFractions`, `global.nvFractions.set=false` |
+| gpu-fractioning | fork `v0.1.6-sm.3` (base upstream v0.1.6), Helm release `gpu-fractioning` in ns `gpu-fractioning`, values [`node-setup/gpu-fractioning-values.yaml`](../node-setup/gpu-fractioning-values.yaml) |
+| Go toolchain (builds) | golang:1.27 container; Docker 29.1.3 + buildx v0.38.1 (user plugin) |
+| Test images | `nvcr.io/nvidia/pytorch:26.09-py3`; `sysbox-ssh-kube-cpu-aware:24.04` (base `nvidia/cuda:13.0.0-devel-ubuntu24.04`) |
 
-> **HAMi is no longer installed.** The HAMi fields in [`main.md`](main.md) §5 (`nvidia.com/gpumem`, `nvidia.com/gpucores`) do not apply on this cluster. The node only advertises `nvidia.com/gpu: 1`.
+Run:ai 3.0.20 was installed before. Its cluster components were removed on 2026-11-13 (backup: `/home/researcher/runai-backup-20261113-2313` on dev03). The `runai-backend` control plane is still installed but unused.
 
 ---
 
-## 3. How GPU sharing works in Run:ai 3.0 / KAI
+## 3. How upstream KAI GPU sharing works
 
-KAI's `configs.kai.scheduler` has a `global.gpuSharingMode` preset:
+`configs.kai.scheduler` → `global.gpuSharingMode`:
 
 | Mode | Memory | Compute | Mechanism |
 |---|---|---|---|
-| `NonMemoryEnforced` | scheduling only, no cap | – | trust-based packing |
-| **`NvFractions`** (this cluster) | ✅ host-side | ❌ | MPS memory accounting (`memacct`) + `fractiond` NRI plugin |
-| `HamiCore` | ✅ | ✅ (soft) | HAMi-core `libvgpu.so`, CUDA interception inside the container (kernel-launch throttling) |
-| `Disabled` | – | – | – |
+| `NonMemoryEnforced` | scheduling only | – | trust-based packing |
+| **`NvFractions`** (used) | ✅ | ❌ upstream | gpu-fractioning: `fractiond` NRI plugin + `mpsd` (MPS daemon) + `metricsd` |
+| `HamiCore` | ✅ | ✅ (soft) | HAMi-core CUDA interception inside the container |
 
-Inside `NvFractions`:
+Upstream `NvFractions` in detail:
+- **Admission** turns `gpu-fraction` / `gpu-memory` into `nvidia.com/container.<c>.gpu-memory.request`, sizing fractions from the node label `nvidia.com/gpu.memory`.
+- **fractiond** injects `NVIDIA_GPU_MEMORY_LIMIT/REQUEST`, `NVIDIA_VISIBLE_DEVICES=<CDI device>` and `CUDA_MPS_PIPE_DIRECTORY`. In the default mode it bind-mounts the **whole** `/run/nvidia-mps`.
+- **The memory cap** is set by the Container Toolkit's `apply-cuda-memory-limits` CDI hook, which puts an NVML per-cgroup limit on the container's cgroup.
+- **Compute:** `time-slicing` is driver round-robin, an even split whatever the fraction. `sm-sharing` puts everyone in one 100 % MPS namespace. Neither caps compute.
 
-- **Admission** turns `gpu-fraction` / `gpu-memory` annotations into `nvidia.com/container.<c>.gpu-memory.request` and sets `runtimeClassName: nvidia`. It does not override a different runtime class that is already set.
-- **fractiond** (NRI plugin) adds `CUDA_MPS_PIPE_DIRECTORY`, `NVIDIA_GPU_MEMORY_LIMIT/REQUEST`, `NVIDIA_VISIBLE_DEVICES=<CDI device>` and mounts `/run/nvidia-mps` at container creation. It adds no OCI hooks.
-- **mpsd** runs `nvidia-cuda-mps-control` in multi-user mode with one root server, `shared`, and one namespace, `default` (100 %, unlimited). `context-share default_socket=off`: a client that connects to the root socket gets memory accounting but a *native* CUDA context (log: "fallback to normal CUDA operation").
-- **Compute modes** (annotation `nvidia.com/container.<c>.gpu-compute.mode`):
-  - default `time-slicing`: native contexts, driver round-robin;
-  - `sm-sharing`: the client joins the `default` MPS namespace, so pods run concurrently but with no cap.
+Measured upstream (fp32 matmul, one pod alone ~124 TFLOPS):
 
-**Driver time-slicing is not weighted.** `nvidia-smi compute-policy` only changes the slice length for the whole GPU (`Timeslice: Default`), not per process. Weighted time-slicing (Run:ai's Fair/Strict modes) needs a component that gates kernel submission, i.e. CUDA interception (`HamiCore`). `NvFractions` doesn't have one.
-
----
-
-## 4. Sysbox + GPU: making it work
-
-Files: [`node-setup/`](../node-setup/).
-
-| Attempt | Result |
-|---|---|
-| `runtimeClassName: sysbox-runc` + `gpu-fraction` | ❌ KAI schedules the pod and fractiond injects the MPS env and mount, but **no GPU** (`Found no NVIDIA driver`). A fractional pod receives its GPU only through `nvidia-container-runtime` reading `NVIDIA_VISIBLE_DEVICES=<CDI name>`. |
-| Pod annotation `cdi.k8s.io/gpu: <CDI name>` with `sysbox-runc` | ❌ containerd reads CDI annotations from the *container* config, and kubelet doesn't copy pod annotations there. |
-| **`nvidia-sysbox`**: `nvidia-container-runtime` (CDI mode) with `runtimes = ["sysbox-runc"]` | ✅ GPU injected, then Sysbox runs the container with user namespaces. |
-
-`nvidia-sysbox` is a separate runtime with its own wrapper (`/usr/local/bin/nvidia-sysbox-runtime`) and config (`/etc/nvidia-sysbox/config.toml`). The GPU-operator-managed `nvidia` runtime is untouched. The containerd drop-in lives in `/var/lib/rancher/rke2/agent/etc/containerd/config-v3.toml.d/`, which RKE2 keeps across config regeneration.
-
-With `hostUsers: false`, container root maps to a random host UID range (e.g. `0 → 941555712`, 65536 IDs). MPS multi-user mode accepts these UIDs.
-
----
-
-## 5. Memory (KAI `NvFractions`)
-
-### 5.1 Granularity
-
-| Request | KAI annotation | Device reports | Usable (allocation loop) |
-|---|---|---|---|
-| `gpu-fraction: "0.01"` | 409Mi | – | too small: CUDA context + PyTorch init alone runs out of memory |
-| `gpu-fraction: "0.05"` | 2Gi | 2.0 GiB | 1.56 GiB |
-| `gpu-fraction: "0.25"` | 10Gi | 10.0 GiB | 9.56 GiB |
-| `gpu-fraction: "0.33"` | 13516Mi | 13.2 GiB | 12.75 GiB |
-| `gpu-fraction: "0.777"` | 31948Mi (rounded to 0.78) | 31.2 GiB | 30.75 GiB |
-| `gpu-memory: "1000"` | 1000Mi | 1000 MiB | (PyTorch init fails) |
-| `gpu-memory: "1500M"` / `"3G"` / `"2.5Gi"` | rejected by admission webhook (`strconv.ParseUint`) | – | – |
-
-- `gpu-fraction` is rounded to **2 decimals**, about 409 MiB steps on 40 GiB.
-- `gpu-memory` is an **integer number of MiB**, so 1 MiB steps.
-- About 0.45 GiB of each slice is taken by the CUDA context. `cudaMemGetInfo` reports the reduced total, so frameworks that size themselves from free memory (vLLM, etc.) behave correctly.
-
-### 5.2 Enforcement: root inside Sysbox
-
-All of these were run as uid 0 in a `nvidia-sysbox` pod with `hostUsers: false`, fraction 0.25:
-
-| Attempt | Result |
-|---|---|
-| Unset `CUDA_MPS_PIPE_DIRECTORY`, `NVIDIA_GPU_MEMORY_LIMIT/REQUEST` | capped at 10 GiB |
-| Point the pipe at a fake directory | capped |
-| `umount /run/nvidia-mps` + tmpfs over it | capped |
-| All of the above, launched without a shell (`/usr/bin/env -u … python`) so the image's `cudaCheck` never runs | capped |
-
-So the memory cap is enforced outside the container: the MPS control daemon tracks clients by cgroup (`memacct: Tracking mps client … cgroup_fd=present`). **But see [§9.1](#91-kai-memacct-applies-a-stale-memory-limit-under-sysbox).**
-
----
-
-## 6. Compute without the agent
-
-fp32 matmul TFLOPS, A100-40GB (one pod alone: ~124).
-
-| Scenario | Pod 1 | Pod 2 | Notes |
-|---|---|---|---|
-| Any fraction alone (0.05 – 0.78) | ~124 | – | all 108 SMs, not capped |
-| 2 × 0.5, time-slicing | 56.2 | 56.2 | even split, ~10 % context-switch overhead |
-| 0.25 vs 0.75, time-slicing | 56.2 | 56.3 | **fraction ignored** |
-| 2 × 0.5, `sm-sharing` | 59.0 | 59.1 | concurrent (`M+C`), ~5 % more total |
-| 0.25 vs 0.75, `sm-sharing` | 58.6 | 58.6 | fraction ignored |
-| User sets `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=25` | 35.4 (26 SMs) | – | voluntary; the user can unset it |
-
----
-
-## 7. `gpu-sm-agent`: per-pod SM caps
-
-Files: [`images/gpu-sm-agent/`](../images/gpu-sm-agent/). Example pod: [`manifests/pod-gpu-fraction-sm.yaml`](../manifests/pod-gpu-fraction-sm.yaml).
-
-### 7.1 The MPS feature it uses
-
-Driver 615 ships MPS **protocol 3** (`nvidia-cuda-mps-control -p 3`). It supports named namespaces on a server, each with its own socket directory and limits:
-
-```bash
-export CUDA_MPS_PIPE_DIRECTORY=/run/nvidia-mps
-nvidia-cuda-mps-control -p 3 namespace create ciinst01 --server=shared
-nvidia-cuda-mps-control -p 3 namespace set ciinst01 --server=shared \
-    --active-thread-percentage=25 --pinned-memory-limit=10240M
-# socket: /run/nvidia-mps/shared/ciinst01/control
-```
-
-- Namespace names must be alphanumeric (`[a-z0-9]`, `-` and `_` are rejected), up to about 32 characters.
-- Static SM partitions also exist (`sm-partition`, 54 chunks of 2 SMs on A100), not tested.
-
-The agent adds namespaces to **KAI's existing `shared` server**, so KAI's `mpsd` keeps running.
-
-### 7.2 Design
-
-```mermaid
-flowchart LR
-  subgraph Pod["Compute Instance pod (nvidia-sysbox, hostUsers:false)"]
-    U[user CUDA process]
-  end
-  subgraph Host["Node"]
-    KAI[KAI fractiond NRI<br/>memory limit + /run/nvidia-mps mount]
-    MPSD[KAI mpsd<br/>MPS server 'shared']
-    NS[(namespace ciinst01<br/>25% SM, 10240M)]
-    AG[gpu-sm-agent DaemonSet<br/>hostPID, CAP_KILL]
-  end
-  API[(kube-apiserver)]
-  AG -- watch pods on node --> API
-  AG -- create/set/delete namespace --> MPSD
-  MPSD --- NS
-  U -- /run/ci-mps = hostPath shared/ciinst01 --> NS
-  AG -- "nvidia-smi PIDs + client list<br/>SIGKILL violators" --> U
-  KAI -.-> Pod
-```
-
-**What the platform puts on the pod** (users never write this themselves):
-
-```yaml
-metadata:
-  annotations:
-    gpu-fraction: "0.25"          # KAI: memory
-    ci.gpu/sm-percent: "25"       # agent: SM %
-    ci.gpu/mps-ns: "ciinst01"     # agent: namespace, ci[a-z0-9]{0,28}, unique per node
-spec:
-  runtimeClassName: nvidia-sysbox
-  hostUsers: false
-  volumes:
-    - name: ci-mps
-      hostPath: {path: /run/nvidia-mps/shared/ciinst01, type: Directory}
-  # container: mount at /run/ci-mps, export CUDA_MPS_PIPE_DIRECTORY=/run/ci-mps
-```
-
-**Every 0.5 s the agent:**
-
-1. Lists pods on its node and keeps those with valid `ci.gpu/*` annotations. Bad names, bad percentages and duplicate namespaces are rejected and logged. It waits until KAI has written `gpu-memory.request`.
-2. **Reconciles namespaces:** creates missing ones, sets `active-thread-percentage = sm-percent` and `pinned-memory-limit = KAI memory`, and deletes `ci*` namespaces whose pod is gone.
-3. **Enforces:** for every GPU process (`nvidia-smi -q -d PIDS`, host PIDs) whose `/proc/<pid>/cgroup` belongs to an enforced pod:
-   - type `C` (native context, skipped MPS) → `SIGKILL`;
-   - type `M+C` but `client list` shows a different namespace → `SIGKILL`;
-   - type `M+C` not yet listed → 4 ticks of grace, then `SIGKILL`.
-
-**Startup ordering:** the hostPath uses `type: Directory`, and kubelet retries the mount until the agent has created the namespace. So the container never starts without its cap.
-
-### 7.3 Holes found and closed
-
-| Hole | Fix |
-|---|---|
-| Root skips MPS (`CUDA_MPS_PIPE_DIRECTORY=/nonexistent`), gets a native context with all 108 SMs | agent kills processes of type `C` |
-| fractiond mounts the **whole** `/run/nvidia-mps` tree, including `shared/default` (100 %) and every other pod's namespace socket | agent checks each client's actual namespace (`client list`) |
-| `EXCLUSIVE_PROCESS` compute mode as an alternative | ❌ doesn't work: the MPS server only holds the GPU while it has clients, so a native process takes it when the GPU is idle |
-| Hiding `/dev/nvidia0` so native contexts can't be created | ❌ MPS clients need it too. `mknod` is blocked in the user namespace. |
-| Agent's `kill` got `EPERM` | containerd's default AppArmor profile only allows signals to peers with the same profile. Agent runs `appArmorProfile: Unconfined` (capabilities stay limited to `KILL`, `DAC_OVERRIDE`). |
-| A workload sets `ci.gpu/sm-percent` higher than its memory fraction (self-service compute) | agent clamps SM% to `ceil(mem/gpu_total*100)+slack`; see security-testing.md §6b |
-| NGC images run `/usr/local/bin/cudaCheck` from shell init, which opens a native context | killed by the agent (harmless). The Compute Instance image doesn't have it. |
-
----
-
-## 8. Test results with the agent
-
-All pods: `nvidia-sysbox`, `hostUsers: false`, KAI fraction + `ci.gpu/*`.
-
-### 8.1 Correctness: 8 sequential pods
-
-| Fraction / SM % | SMs | Reported | Usable | TFLOPS alone |
-|---|---|---|---|---|
-| 0.25 / 25 % | 26 | 10.0 GiB | 9.88 GiB | 35.2 |
-| 0.5 / 75 % | 80 | 20.0 GiB | 19.69 GiB | 100.2 |
-| 0.1 / 10 % | 10 | 4.0 GiB | 3.94 GiB | 13.6 |
-| 0.75 / 50 % | 54 | 30.0 GiB | 29.75 GiB | 73.5 |
-
-The SM count was right in every run. SM mapping: 10 % → 10, 25 % → 26, 50 % → 54, 75 % → 80.
-
-### 8.2 Contention
-
-| Pods running together | SMs | Memory cap | TFLOPS |
-|---|---|---|---|
-| A: 25 % · B: 75 % (either start order) | 26 · 80 | 9.88 · 24.69 GiB | **29.7 · 90.2** (1:3) |
-| Same, with the GPU in `EXCLUSIVE_PROCESS` | 26 · 80 | same | 29.7 · 90.1 |
-
-### 8.3 Bypass attempts (root in Sysbox)
-
-| Attempt | Without agent | With agent |
+| Scenario | Pod 1 | Pod 2 |
 |---|---|---|
-| `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=100` | ignored (26 SMs) | ignored |
-| `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT=0=40G` | ignored | ignored |
-| Skip MPS (native context) | **108 SMs** | killed (`native GPU context (type C)`) |
-| Join `shared/default` or another pod's namespace | **possible** | killed (`MPS client in namespace …`) |
-| Look for other namespaces | only via fractiond's `/run/nvidia-mps` mount | – |
-
-### 8.4 Memory under churn (Sysbox)
-
-| Run | Agent memory mirror | Pods | Over-allocated | Under-allocated |
-|---|---|---|---|---|
-| KAI only, `nvidia-sysbox` | – | 12 | **1** (4 → 30 GiB) | 1 (30 → 20 GiB) |
-| KAI + agent (SM only) | no | 8 | 0 | 1 (30 → 4 GiB) |
-| KAI + agent (SM only), UID-base check | no | 10 | **1** (4 → 10 GiB) | 0 |
-| KAI + agent | **yes** | 14 | **0** | 2 (30 → 10, 30 → 4 GiB) |
-| KAI + agent | yes | 12 | 0 | 0 |
-| KAI only, plain `nvidia` runtime (runc) | – | 36 (12 + 24) | 0 | 0 |
+| any fraction alone | ~124 (108 SMs) | – |
+| 0.25 vs 0.75, time-slicing | 56.2 | 56.3 |
+| 0.25 vs 0.75, sm-sharing | 58.6 | 58.6 |
 
 ---
 
-## 9. Known issues
+## 4. Sysbox + GPU
 
-### 9.1 KAI memacct applies a stale memory limit under Sysbox
+| Attempt | Result |
+|---|---|
+| `runtimeClassName: sysbox-runc` + fraction | ❌ no GPU: fractional pods get it only through `nvidia-container-runtime` reading `NVIDIA_VISIBLE_DEVICES=<CDI name>` |
+| **`nvidia-sysbox`**: `nvidia-container-runtime` (CDI mode) with `runtimes = ["sysbox-runc"]` | ✅ |
 
-**What happens:** a new fractional pod sometimes gets **another pod's** memory limit, both reported and enforced. Examples: 0.1 (4 GiB) got 30 GiB; 0.75 (30 GiB) got 4, 10 or 20 GiB. The stale value is not always the previous pod's; it can come from a pod that ran much earlier.
-
-**Rate:** 6 of 56 pods (about 1 in 9) in fast churn tests (create → finish → delete → next) under Sysbox; **0 of 36** on the plain `nvidia` runtime (runc) under the same churn.
-
-**Probable cause (not confirmed):**
-- Under Sysbox, container processes live in a nested cgroup, `…/cri-containerd-<id>.scope/init.scope`.
-- Under runc they live directly in `…/cri-containerd-<id>.scope`.
-- KAI tracks MPS clients by cgroup (`memacct: Tracking mps client … cgroup_fd=present`), so it may be failing to find the container's limit at the nested path and using a leftover value.
-- I tried to confirm this by moving the process to the container root cgroup, but the write to `cgroup.procs` failed (`rc=1`), so the hypothesis is untested. In the systemd Compute Instance image, processes will be nested even deeper (`init.scope/system.slice/…`, `user.slice/…`).
-
-**Mitigation in place:** the agent mirrors KAI's value onto the MPS namespace as `pinned-memory-limit`, so the effective cap is the lower of the two. **No over-allocation** has been seen since (0/26). **Under-allocation remains**: a pod can get less than it asked for, and its reported total is wrong.
-
-**Next steps:**
-- Report upstream to KAI gpu-fractioning (v0.1.6), with the repro in [`testing/gpu-fractioning/churn-kai.sh`](../testing/gpu-fractioning/churn-kai.sh).
-- Agent idea: detect it by running a short probe in the pod's namespace at startup and reading `cuMemGetInfo`, then restart the pod if the value is wrong.
-
-### 9.2 Kill latency and retry bursts
-
-A process that bypasses MPS runs for up to ~0.5–1 s (one tick plus the `nvidia-smi` call) before it is killed. A user retrying in a loop gets repeated short full-GPU bursts. Planned: evict the pod after N kills, which needs `pods/eviction` RBAC.
-
-### 9.3 Not tested yet
-
-- Restart of KAI's `mpsd`: **tested** (security-testing.md §6g) — drops all namespaces, the agent recreates them, running fraction pods need a restart. Also recovers a wedged MPS server.
-- The real `sysbox-ssh-kube-cpu-aware` (systemd) image under `nvidia-sysbox`. Its entrypoint must export `CUDA_MPS_PIPE_DIRECTORY=/run/ci-mps` for SSH sessions, replacing the value fractiond injects.
-- Multi-GPU nodes and MIG.
-- Static `sm-partition` (hard SM partitions in 2-SM chunks) instead of thread percentage.
-
-### 9.4 Small notes
-
-- An MPS namespace's `pinned-memory-limit` caps allocation, but the device then reports the full 39.5 GiB, unlike KAI's memacct. This is why KAI stays the source of the reported size.
-- The agent needs `hostPID`, `CAP_KILL`, `CAP_DAC_OVERRIDE` and an unconfined AppArmor profile, plus cluster-wide `get/list/watch pods`. Treat it like other node agents.
+`nvidia-sysbox` is its own wrapper (`/usr/local/bin/nvidia-sysbox-runtime`) and config (`/etc/nvidia-sysbox/config.toml`), so the GPU operator's `nvidia` runtime is untouched. With `hostUsers: false`, container root maps to a random host UID range.
 
 ---
 
-## 10. Reproduce
+## 5. Problems found with upstream under Sysbox
+
+1. **No compute limit** (§3).
+2. **Whole MPS tree in every pod.** Any tenant could reach the node's root control socket and join or inspect other tenants' MPS namespaces. Mutating commands need real UID 0, which Sysbox prevents; reading and joining did not.
+3. **Wrong GPU memory.**
+   - NVML resolves a process's limit from the nearest cgroup that has an entry. Sysbox runs workloads in `<scope>/init.scope`, and that child was seen carrying other pods' values: **6 of 12 pods wrong** in a create/delete churn, some over-allocated (4 GiB asked, 30 GiB given).
+4. **Stray limits on unrelated pods.**
+   - Entries with fractional pods' values were found on the cgroups of system pods: GPU feature discovery, mpsd, and 25 cgroups in total.
+   - NVML caps the memory it *reports* by the caller's cgroup. So GFD published `nvidia.com/gpu.memory=30720` on a 40 GB card, and KAI sized every fraction from it (0.25 → 7.5 GiB).
+   - The writer was not identified. The toolkit hook received the correct PID in all 11 calls traced with a logging wrapper, and no new strays appeared in a 10-pod churn.
+
+---
+
+## 6. The fork
+
+Both features default **off**; with them off the fork behaves like upstream v0.1.6. Design and per-component detail: `docs/fork/DESIGN.md` in the fork.
+
+| Setting | Component | What it does |
+|---|---|---|
+| `smLimit.enabled` | fractiond | New default compute mode `sm-limit`. Writes a namespace request, waits ≤1.5 s for mpsd, then mounts **only** `<pipe>/shared/<ns>` at `/tmp/nvidia-mps`. Fails the creation if the namespace isn't ready (kubelet retries) rather than start uncapped. |
+| | mpsd | One MPS namespace per container: active-thread % = ceil(`gpu-fraction` × 100), pinned memory = allotment. Recreated after a daemon restart. Talks to the daemon only on change or every 10 s. |
+| | metricsd | Kills native (non-MPS) CUDA processes in sm-limit containers. |
+| `smLimit.enforce` | fractiond | Ignores `gpu-compute.mode`: no opting out. |
+| `memoryGuard.enabled` | metricsd | Every 0.5 s re-asserts each fractional container's NVML limit on its whole cgroup subtree. Every 10 s resets stray entries on other kubepods cgroups older than 30 s. |
+
+- Namespace names are `fc` + SHA-256 of the container ID: opaque, but deterministic for fractiond, its audit and mpsd.
+- `gpu-sm-percent` is pod-level because KAI's admission rejects unknown keys under `nvidia.com/container.`.
+
+Instance image change: [`images/sysbox-ssh-kube-cpu-aware/entrypoint.sh`](../images/sysbox-ssh-kube-cpu-aware/entrypoint.sh) carries `CUDA_MPS_PIPE_DIRECTORY`, `NVIDIA_GPU_MEMORY_LIMIT/REQUEST`, `NVIDIA_VISIBLE_DEVICES` and `NVIDIA_DRIVER_CAPABILITIES` into SSH/PAM sessions. The login banner shows the GPU memory limit.
+
+---
+
+## 7. Results (fork v0.1.6-sm.3 on dev03)
+
+| Test | Result |
+|---|---|
+| A. 12 Sysbox pods, alternating 0.1 / 0.75 | **12/12 exact**: 4.0 GiB reported / 3.88 usable / 10 SMs; 30.0 / 29.69 / 80 SMs |
+| B. 0.25 and 0.75 at the same time | 26 vs 80 SMs; 30.2 vs 91.6 TFLOPS |
+| C. root in the pod skips MPS | process killed by metricsd; neighbour unaffected |
+| D. pod sets `gpu-compute.mode: time-slicing` | ignored: 26 SMs |
+| E. `gpu-sm-percent: 20` on 0.5 / `90` on 0.25 | 20 SMs, 20 GiB / still 26 SMs |
+| F. tenant view | only `/tmp/nvidia-mps/control`; no `/run/nvidia-mps`, request dir or map dir; `client list` empty; `namespace set` refused (UID) |
+| G. MPS daemon restart with a capped pod running | namespace recreated with the same name; the pod's mount sees the new socket; new GPU work still 26 SMs / 10 GiB |
+| H. real instance image, login as `ubuntu` | banner `GPU memory : 10240 MiB`; `gpucheck` (nvcc-built) sees 26 SMs, 10.00 GiB, allocates 9.88 GiB |
+| Stray sweep | 25 entries reset; `nvidia.com/gpu.memory` back to 40960 within one GFD relabel |
+| mpsd log volume | ~2,400 → ~70 lines/min |
+
+Memory granularity (unchanged from upstream): `gpu-fraction` is rounded to 2 decimals (~409 MiB steps on 40 GiB); `gpu-memory` is integer MiB. About 0.12–0.45 GiB of a slice goes to the CUDA context.
+
+---
+
+## 8. Known limits
+
+- `namespace list` through a tenant's own socket still shows every namespace's SM % and memory. MPS answers it on any socket. Names are opaque.
+- A bypassing process runs for up to ~0.5 s before it is killed. A tenant retrying in a loop gets short bursts.
+- The stray-limit writer is unknown. The sweep repairs entries within 10 s, but a pod created while a stray sits on its future parent could see a wrong value for that window.
+- Tested on one GPU per node only. MIG and multi-GPU are untested.
+- Per-pod PID limit is still unset (see [security-testing.md](security-testing.md) §6e).
+
+---
+
+## 9. Reproduce
 
 ```bash
-# node setup (restarts rke2-server, no reboot)
+# node: Sysbox + nvidia-sysbox runtime (restarts rke2-server, no reboot)
 bash node-setup/install.sh
 
-# agent
-kubectl apply -f images/gpu-sm-agent/daemonset.yaml
-kubectl -n gpu-sm-agent create configmap gpu-sm-agent \
-  --from-file=images/gpu-sm-agent/agent.py --dry-run=client -o yaml | kubectl apply -f -
+# scheduler
+helm upgrade -i kai-scheduler oci://ghcr.io/kai-scheduler/kai-scheduler/kai-scheduler --version v0.18.3 \
+  -n kai-scheduler --create-namespace \
+  --set global.gpuSharingMode=NvFractions --set global.nvFractions.set=false
+kubectl apply -f node-setup/kai-queues.yaml
 
-# probe (Run:ai project namespace)
-cd testing/gpu-fractioning
-kubectl -n runai-llm-team create configmap frac-probe --from-file=frac-probe.py=probe.py
-bash mk-ci-pod.sh t1 0.25 25 cit1 '[{name: DWELL, value: "20"}]' | kubectl apply -f -
-bash wait-ci.sh t1          # RESULT {"SMs": 26, "total_GiB": 10.0, "alloc_max_GiB": 9.875, "TFLOPS": 35.4}
+# fork (build + import on the node, then install)
+git clone -b sysbox-sm-limit https://github.com/suppakorn-tae/gpu-fractioning && cd gpu-fractioning
+hack/fork/build-local.sh v0.1.6-sm.3
+helm upgrade -i gpu-fractioning operator/charts -n gpu-fractioning --create-namespace \
+  -f ../compute-instance/node-setup/gpu-fractioning-values.yaml
 
-# stale-limit repro (KAI only)
-RC=nvidia-sysbox bash churn-kai.sh kc 12 '["python","/probe/frac-probe.py"]'
-RC=""            bash churn-kai.sh kr 12 '["python","/probe/frac-probe.py"]'
+# a probe
+cd ../compute-instance/testing/gpu-fractioning
+kubectl create ns ci-tenants
+kubectl -n ci-tenants create configmap frac-probe --from-file=frac-probe.py=probe.py
+bash mk-kai-pod.sh t1 nvidia-sysbox 'gpu-fraction: "0.25"' '[{name: DWELL, value: "5"}]' '["python","/probe/frac-probe.py"]' | kubectl apply -f -
+bash wait-kai.sh t1     # RESULT {"SMs": 26, "total_GiB": 10.0, ...}
+
+# churn (memory correctness)
+RC=nvidia-sysbox bash churn-kai.sh a 12 '["python","/probe/frac-probe.py"]'
 ```
 
-Inspecting MPS state:
-
-```bash
-export CUDA_MPS_PIPE_DIRECTORY=/run/nvidia-mps
-sudo -E nvidia-cuda-mps-control -p 3 namespace list
-sudo -E nvidia-cuda-mps-control -p 3 client list --all --format=csv
-kubectl -n gpu-sm-agent logs ds/gpu-sm-agent | grep -E 'kill|reject|error'
-```
-
-Rollback: `kubectl delete -f images/gpu-sm-agent/daemonset.yaml`, then `bash node-setup/uninstall.sh`.
+Inspecting: `sudo python3 -I <fork>/hack/fork/nvml_scan_strays.py` lists cgroups with their own NVML limit. MPS state: `CUDA_MPS_PIPE_DIRECTORY=/run/nvidia-mps sudo -E nvidia-cuda-mps-control -p 3 namespace list`.

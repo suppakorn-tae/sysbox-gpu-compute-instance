@@ -177,7 +177,7 @@ This ensures that GPU limits are visible regardless of how the user connects.
 
 ---
 
-> **Update (2026-11-13):** HAMi has been replaced by Run:ai/KAI `NvFractions` on the test cluster. For GPU fractioning under Sysbox (memory and compute limits, the `gpu-sm-agent` prototype and measured results), see [gpu-fractioning-sysbox.md](gpu-fractioning-sysbox.md).
+> **Update (2026-11-13):** HAMi has been replaced by upstream KAI-Scheduler with a forked gpu-fractioning that caps both GPU memory and SMs per fraction under Sysbox. See [gpu-fractioning-sysbox.md](gpu-fractioning-sysbox.md).
 
 ---
 

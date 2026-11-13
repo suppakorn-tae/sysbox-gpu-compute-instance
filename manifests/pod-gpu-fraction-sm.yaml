@@ -1,25 +1,25 @@
-# Compute instance with a GPU fraction (memory, KAI) + SM cap (gpu-sm-agent).
-# Requires: Sysbox + the nvidia-sysbox RuntimeClass, KAI/Run:ai NvFractions,
-#           gpu-sm-agent DaemonSet (images/gpu-sm-agent/).
+# Compute instance with a GPU fraction: memory AND compute capped to the fraction.
+# Requires: Sysbox + the nvidia-sysbox RuntimeClass (node-setup/), upstream KAI
+# scheduler (NvFractions), and the forked gpu-fractioning with smLimit.enforce and
+# memoryGuard on (node-setup/gpu-fractioning-values.yaml).
 #
-# The platform (not the user) fills in the three values below. The MPS namespace
-# name must be unique per node, match ci[a-z0-9]{0,28}, and equal the hostPath suffix.
+# gpu-fraction alone sets both limits: 0.25 -> 10 GiB and 25% of SMs (~26 of 108).
+# Optional: gpu-sm-percent lowers the SM share (never raises it).
 apiVersion: v1
 kind: Pod
 metadata:
   name: ci-inst01
-  namespace: runai-llm-team            # a Run:ai project namespace
+  namespace: ci-tenants
   labels:
-    project: llm-team
+    kai.scheduler/queue: tenants
   annotations:
-    gpu-fraction: "0.25"               # memory: 10 GiB on a 40 GiB A100, reported exactly
-    ci.gpu/sm-percent: "25"            # compute: 25% of SMs (~26 of 108)
-    ci.gpu/mps-ns: "ciinst01"
+    gpu-fraction: "0.25"
+    # gpu-sm-percent: "20"
 spec:
   automountServiceAccountToken: false   # tenants don't need API access
-  schedulerName: runai-scheduler
+  schedulerName: kai-scheduler
   runtimeClassName: nvidia-sysbox
-  hostUsers: false
+  hostUsers: false                      # required: also what stops tenants from mutating MPS
   containers:
     - name: main
       image: sysbox-ssh-kube-cpu-aware:24.04
@@ -29,20 +29,9 @@ spec:
           value: ubuntu
         - name: INSTANCE_PASSWORD
           value: "changeme123"
-        # fractiond also injects CUDA_MPS_PIPE_DIRECTORY=/run/nvidia-mps; the image's
-        # entrypoint must export this value for user sessions instead.
-        - name: CI_MPS_PIPE_DIRECTORY
-          value: /run/ci-mps
       ports:
         - {name: ssh, containerPort: 22}
       resources:
         limits:
           cpu: "2"
           memory: "8Gi"
-      volumeMounts:
-        - {name: ci-mps, mountPath: /run/ci-mps}
-  volumes:
-    - name: ci-mps
-      hostPath:
-        path: /run/nvidia-mps/shared/ciinst01   # kubelet retries until gpu-sm-agent creates it
-        type: Directory

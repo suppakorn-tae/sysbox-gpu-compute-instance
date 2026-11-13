@@ -204,6 +204,24 @@ No `NetworkPolicy` exists in the tenant project namespace. From `atk`, confirmed
 
 ---
 
+### 7. Round 3: upstream KAI + forked gpu-fractioning (2026-11-14)
+
+Run:ai was removed. GPU fractions now come from upstream KAI-Scheduler v0.18.3 plus the forked gpu-fractioning `v0.1.6-sm.3` with `smLimit.enforce` and `memoryGuard` on (details: [gpu-fractioning-sysbox.md](gpu-fractioning-sysbox.md) §6–7). The `gpu-sm-agent` from rounds 1–2 is removed; its job moved into the fork. Re-tested as root in a 0.25-fraction Sysbox pod, next to a running victim pod:
+
+| Finding (earlier round) | Now | Evidence |
+|---|---|---|
+| 5 / 6a: whole `/run/nvidia-mps` tree in every pod (root control socket, other tenants' sockets, write access to shared dirs) | **Fixed.** Only `/tmp/nvidia-mps` = the pod's own namespace is mounted; `/run/nvidia-mps` and the daemons' directories are absent | test F |
+| 5: read-only cross-tenant visibility | **Reduced.** `client list` (PIDs) is empty. `namespace list` via the pod's own socket still shows every namespace's SM % and memory, with opaque names (SHA-256 of container IDs) | test F |
+| 6a: mutating MPS control | Still **blocked** (`'NAMESPACE SET' requires root`), still depends on `hostUsers: false` | test F |
+| 6b: compute cap set by a self-service annotation | **Fixed by design.** The SM share comes from the scheduler's `gpu-fraction`; `gpu-sm-percent` can only lower it (90 on 0.25 → still 26 SMs) | test E |
+| 6c: native-context bypass | Killed by the fork's metricsd within one 0.5 s tick | test C |
+| opt out of the cap via `gpu-compute.mode: time-slicing` | Ignored (enforced) | test D |
+| GPU memory wrong under Sysbox (6/56 earlier) | **Fixed.** 12/12 exact in churn | test A |
+| *New:* stray NVML limits on unrelated pods (GFD, mpsd, system pods) shrank their GPU view; GFD published 30720 MiB, so KAI under-sized every fraction | **Repaired** by the guard's sweep (25 entries reset; label back to 40960). Writer not identified | §5 / §7 of the report |
+| *New:* MPS daemon restart | Namespaces come back; running pods stay capped without a restart | test G |
+
+---
+
 ## Current Summary
 
 | Area | Status |
@@ -213,13 +231,11 @@ No `NetworkPolicy` exists in the tenant project namespace. From `atk`, confirmed
 | Docker-in-Container | Verified working via standard installation under Sysbox |
 | Fail2ban systemd daemon | Configured and confirmed automatically active on boot |
 | MPS cross-tenant control (mutate another tenant) | **Blocked** by Sysbox UID remapping (needs `hostUsers: false`) |
-| MPS cross-tenant visibility (read others' limits/PIDs) | Confirmed, inherent to KAI's shared MPS server; use separate server/GPU/MIG for untrusting tenants |
-| GPU-fraction compute-cap bypass (`sm-percent` annotation) | Was open (got 108 SMs); **patched** — agent clamps SM% to memory fraction |
-| GPU-fraction memory cap (KAI memacct under Sysbox) | Stale/cross-pod limit observed, 6/56 pods; see gpu-fractioning-sysbox.md §9.1 |
-| GPU-fraction compute cap (gpu-sm-agent) | Enforced; native-context and wrong-namespace bypass killed by agent |
+| MPS tree exposure (other tenants' sockets, root control socket) | **Fixed** by the fork: only the pod's own namespace is mounted |
+| MPS cross-tenant visibility | Reduced to `namespace list` (opaque names, SM %, memory); PIDs no longer visible |
+| GPU-fraction compute cap | **Enforced** by the fork: SM share = `gpu-fraction`, no opt-out, bypass killed |
+| GPU-fraction memory cap under Sysbox | **Fixed** by the fork's memory guard: 12/12 exact; stray limits on other pods swept |
 | Container-to-host isolation (Sysbox) | Holds (namespaced caps, PID/mount isolation); escape primitives not run |
 | Network isolation (tenant namespace) | Open by default; **patched** — default-deny NetworkPolicy + DNS carve-out |
 | Per-pod PID limit | Missing (node default 57709); set kubelet `--pod-max-pids` |
-| Inter-pod network isolation | Planned (default-deny with opt-in communication) |
-| Container-to-host isolation | Planned |
-| CPU/RAM/PID/storage enforcement | Planned |
+| CPU/RAM enforcement | Enforced (round 2, §6e) |

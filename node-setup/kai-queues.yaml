@@ -1,0 +1,19 @@
+# Minimal KAI queue hierarchy for Compute Instance tenants (no quotas).
+apiVersion: scheduling.run.ai/v2
+kind: Queue
+metadata: {name: default-parent}
+spec:
+  resources:
+    gpu: {quota: -1, limit: -1, overQuotaWeight: 1}
+    cpu: {quota: -1, limit: -1, overQuotaWeight: 1}
+    memory: {quota: -1, limit: -1, overQuotaWeight: 1}
+---
+apiVersion: scheduling.run.ai/v2
+kind: Queue
+metadata: {name: tenants}
+spec:
+  parentQueue: default-parent
+  resources:
+    gpu: {quota: -1, limit: -1, overQuotaWeight: 1}
+    cpu: {quota: -1, limit: -1, overQuotaWeight: 1}
+    memory: {quota: -1, limit: -1, overQuotaWeight: 1}

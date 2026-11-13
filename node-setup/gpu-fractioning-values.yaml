@@ -1,0 +1,35 @@
+# Helm values for the forked gpu-fractioning chart
+# (github.com/suppakorn-tae/gpu-fractioning, branch sysbox-sm-limit), used on dev03.
+#
+#   helm upgrade -i gpu-fractioning <fork>/operator/charts -n gpu-fractioning \
+#     -f node-setup/gpu-fractioning-values.yaml
+#
+# Images are built and imported into containerd by hack/fork/build-local.sh in the fork.
+images:
+  operator:
+    repository: localhost/gpu-fractioning/operator
+    tag: v0.1.6-sm.3
+    pullPolicy: IfNotPresent
+  fractiond:
+    repository: localhost/gpu-fractioning/fractiond
+    tag: v0.1.6-sm.3
+    pullPolicy: IfNotPresent
+  metricsd:
+    repository: localhost/gpu-fractioning/metricsd
+    tag: v0.1.6-sm.3
+    pullPolicy: IfNotPresent
+  mpsd:
+    repository: localhost/gpu-fractioning/mpsd
+    tag: v0.1.6-sm.3
+    pullPolicy: IfNotPresent
+
+# Every fractional container: own MPS namespace, SM share = memory share, only
+# its namespace mounted, bypassing processes killed. Workloads cannot opt out.
+smLimit:
+  enabled: true
+  enforce: true
+
+# Sysbox runs workloads in <scope>/init.scope; keep the NVML memory limit correct
+# on the whole cgroup subtree.
+memoryGuard:
+  enabled: true
