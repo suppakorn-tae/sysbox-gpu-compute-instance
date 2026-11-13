@@ -43,7 +43,7 @@ cat > "/etc/sudoers.d/$SSH_USER" <<SUDOEOF
 Cmnd_Alias DENY_RESOURCE_BYPASS = /usr/bin/tee /sys/fs/cgroup/*, \
     /usr/bin/tee /etc/profile.d/cpuquota.sh, \
     /usr/bin/tee /etc/profile.d/compute-env.sh, \
-    /usr/bin/tee /etc/profile.d/hami.sh, \
+    /usr/bin/tee /etc/profile.d/gpu-env.sh, \
     /usr/bin/tee /etc/profile.d/resource-limits.sh, \
     /usr/bin/tee /etc/environment, \
     /usr/bin/tee /etc/fail2ban/jail.local
@@ -103,7 +103,7 @@ chmod 0644 /etc/profile.d/compute-env.sh
 # the container's env). HAMi's, and KAI gpu-fractioning's: with sm-limit the
 # MPS pipe directory is the container's own MPS namespace (/tmp/nvidia-mps);
 # a session without it would skip MPS and be killed by the enforcer.
-hami_vars=(
+gpu_vars=(
     CUDA_DEVICE_MEMORY_LIMIT_0
     CUDA_DEVICE_MEMORY_SHARED_CACHE
     CUDA_DEVICE_SM_LIMIT
@@ -115,18 +115,18 @@ hami_vars=(
     NVIDIA_DRIVER_CAPABILITIES
 )
 while IFS= read -r v; do
-    [[ -n "$v" ]] && hami_vars+=("$v")
+    [[ -n "$v" ]] && gpu_vars+=("$v")
 done < <(compgen -v CUDA_DEVICE_MEMORY_LIMIT_ || true)
 
 {
-    for var in $(printf '%s\n' "${hami_vars[@]}" | sort -u); do
+    for var in $(printf '%s\n' "${gpu_vars[@]}" | sort -u); do
         if [[ -n "${!var:-}" ]]; then
             printf 'export %s=%q\n' "$var" "${!var}"
         fi
     done
-} > /etc/profile.d/hami.sh
+} > /etc/profile.d/gpu-env.sh
 
-chmod 0644 /etc/profile.d/hami.sh
+chmod 0644 /etc/profile.d/gpu-env.sh
 
 # Resource limits summary (readonly) for user awareness
 cat > /etc/profile.d/resource-limits.sh <<'RESEOF'
@@ -158,7 +158,7 @@ chmod 0644 /etc/profile.d/resource-limits.sh
 # Protect all profile.d enforcement scripts from modification
 chattr +i /etc/profile.d/cpuquota.sh 2>/dev/null || true
 chattr +i /etc/profile.d/compute-env.sh 2>/dev/null || true
-chattr +i /etc/profile.d/hami.sh 2>/dev/null || true
+chattr +i /etc/profile.d/gpu-env.sh 2>/dev/null || true
 chattr +i /etc/profile.d/resource-limits.sh 2>/dev/null || true
 
 # Update /etc/environment so non-login/PAM sessions also inherit the environment
@@ -171,7 +171,7 @@ chattr +i /etc/profile.d/resource-limits.sh 2>/dev/null || true
     printf 'OMP_NUM_THREADS=%q\n' "$OMP_NUM_THREADS"
     printf 'MKL_NUM_THREADS=%q\n' "$MKL_NUM_THREADS"
     printf 'OPENBLAS_NUM_THREADS=%q\n' "$OPENBLAS_NUM_THREADS"
-    for var in $(printf '%s\n' "${hami_vars[@]}" | sort -u); do
+    for var in $(printf '%s\n' "${gpu_vars[@]}" | sort -u); do
         if [[ -n "${!var:-}" ]]; then
             printf '%s=%q\n' "$var" "${!var}"
         fi
