@@ -121,6 +121,32 @@ The following tests are planned; they have **not** been established as completed
 
 ---
 
+### 5. MPS Control-Plane Exposure to GPU-Fraction Tenants
+
+**Objective:** Check whether a GPU-fraction tenant (root inside its own Sysbox instance) is confined to its own GPU slice, or can see and reach the shared MPS control plane and other tenants' resources.
+
+**Environment:** As in [gpu-fractioning-sysbox.md](gpu-fractioning-sysbox.md) §2 — Run:ai 3.0.20 / KAI gpu-fractioning v0.1.6, driver 615.71.09 (MPS protocol 3), Sysbox CE 0.7.1, `nvidia-sysbox` runtime, A100-40GB. Two 0.25-fraction pods (`atk`, `vic`) in the same Run:ai project namespace.
+
+**Root cause (by design in KAI):** the `fractiond` NRI plugin bind-mounts the **entire** host `/run/nvidia-mps` tree into every fractional pod and sets `CUDA_MPS_PIPE_DIRECTORY=/run/nvidia-mps`. That tree contains the MPS root control socket (`control`, mode `srw-rw-rw-`) and **every** tenant's namespace subdirectory, not just the pod's own.
+
+**Observations (from pod `atk`, as container root):**
+- **Cross-tenant visibility (confirmed).** Using the root control socket, `atk` listed the full MPS state: every namespace with its memory and SM limits (including the other tenant `civic`), every MPS server, and every GPU client process cluster-wide (`client list --all`). A tenant can enumerate all co-resident tenants' GPU allocations and PIDs.
+- **Write access to shared directories (confirmed).** `atk` could create and delete files in `/run/nvidia-mps`, `/run/nvidia-mps/shared`, and the *other* tenant's directory `/run/nvidia-mps/shared/civic`. (Test files were created and immediately removed.)
+- **Control socket reachable (confirmed).** The root control daemon accepted read commands (`namespace list`, `client list`, `server list`, `feature describe`) from the tenant.
+
+**Not tested (deliberately stopped):** whether a tenant can issue *mutating* control commands against another tenant — e.g. `namespace set civic --active-thread-percentage=…` or `namespace delete civic` — which, if accepted, would let one tenant shrink, starve, or disrupt another's GPU slice. This is the highest-value follow-up and should be tested with a disposable victim only.
+
+**Current interpretation:** This is a **shared control plane across tenant boundaries**, not a host escape. The per-namespace memory and SM limits themselves held in all earlier tests; the concern is confidentiality (one tenant seeing all others) and the untested possibility of one tenant altering another's slice through the shared root socket. It stems from KAI's whole-tree mount, so it affects any `NvFractions` deployment, with or without Sysbox.
+
+**Mitigations:**
+- Mount only the pod's own namespace subdirectory (`/run/nvidia-mps/shared/<ns>`) and point `CUDA_MPS_PIPE_DIRECTORY` at it, instead of the whole `/run/nvidia-mps` tree. The `gpu-sm-agent` example pod already mounts just `/run/ci-mps = shared/<ns>`; the exposure comes from the *additional* whole-tree mount and env var that `fractiond` injects, which would need to be overridden or the plugin reconfigured.
+- Report upstream to KAI gpu-fractioning (v0.1.6) as a tenant-isolation issue.
+- Until then, treat co-scheduled GPU fractions as **mutually trusting**: do not place fractions from different trust domains on the same physical GPU; use a whole GPU or MIG for untrusted tenants.
+
+**Evidence / repro:** `testing/gpu-fractioning/mk-ci-pod.sh` to create two fraction pods, then from inside one: `CUDA_MPS_PIPE_DIRECTORY=/run/nvidia-mps nvidia-cuda-mps-control -p 3 namespace list`.
+
+---
+
 ## Current Summary
 
 | Area | Status |
@@ -129,6 +155,9 @@ The following tests are planned; they have **not** been established as completed
 | Tailscale SSH and HTTP connectivity | Successfully tested through the configured Tailscale path |
 | Docker-in-Container | Verified working via standard installation under Sysbox |
 | Fail2ban systemd daemon | Configured and confirmed automatically active on boot |
+| MPS control-plane / GPU-fraction tenant isolation | **Cross-tenant visibility and shared-dir write confirmed** (KAI whole-tree mount); mutating cross-tenant control commands not yet tested |
+| GPU-fraction memory cap (KAI memacct under Sysbox) | Stale/cross-pod limit observed, 6/56 pods; see gpu-fractioning-sysbox.md §9.1 |
+| GPU-fraction compute cap (gpu-sm-agent) | Enforced; native-context and wrong-namespace bypass killed by agent |
 | Inter-pod network isolation | Planned (default-deny with opt-in communication) |
 | Container-to-host isolation | Planned |
 | CPU/RAM/PID/storage enforcement | Planned |
