@@ -1,0 +1,17 @@
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.'sysbox-runc']
+  runtime_type = "io.containerd.runc.v2"
+  pod_annotations = ["io.kubernetes.cri.*", "nvidia.com/*", "gpu-fraction*"]
+  container_annotations = ["nvidia.com/*"]
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.'sysbox-runc'.options]
+  BinaryName = "/usr/bin/sysbox-runc"
+  SystemdCgroup = true
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.'nvidia-sysbox']
+  runtime_type = "io.containerd.runc.v2"
+  pod_annotations = ["io.kubernetes.cri.*", "nvidia.com/*", "gpu-fraction*"]
+  container_annotations = ["nvidia.com/*"]
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.'nvidia-sysbox'.options]
+  BinaryName = "/usr/local/bin/nvidia-sysbox-runtime"
+  SystemdCgroup = true

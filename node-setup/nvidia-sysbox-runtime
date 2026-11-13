@@ -1,0 +1,5 @@
+#!/bin/sh
+# nvidia-container-runtime (CDI mode) chained in front of sysbox-runc.
+NVIDIA_CTK_CONFIG_FILE_PATH=/etc/nvidia-sysbox/config.toml \
+PATH=/usr/local/nvidia/toolkit:/usr/bin:$PATH \
+  exec /usr/local/nvidia/toolkit/nvidia-container-runtime.real "$@"

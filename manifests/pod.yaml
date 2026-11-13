@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sysbox-hami-test
+  labels:
+    app: sysbox-hami-test
+spec:
+  runtimeClassName: sysbox-runc
+  hostUsers: false
+  containers:
+    - name: ubuntu
+      image: sysbox-ssh-kube-cpu-aware:24.04
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: INSTANCE_USER
+          value: ubuntu
+        - name: INSTANCE_PASSWORD
+          value: "changeme123"
+      ports:
+        - name: ssh
+          containerPort: 22
+      resources:
+        limits:
+          cpu: "2"
+          memory: "2Gi"
+          ephemeral-storage: "10Gi"
+          nvidia.com/gpu: "1"
+          nvidia.com/gpumem: "4096"
+          nvidia.com/gpucores: "10"

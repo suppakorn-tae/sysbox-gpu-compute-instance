@@ -1,0 +1,47 @@
+# Compute instance with a GPU fraction (memory, KAI) + SM cap (gpu-sm-agent).
+# Requires: Sysbox + the nvidia-sysbox RuntimeClass, KAI/Run:ai NvFractions,
+#           gpu-sm-agent DaemonSet (images/gpu-sm-agent/).
+#
+# The platform (not the user) fills in the three values below. The MPS namespace
+# name must be unique per node, match ci[a-z0-9]{0,28}, and equal the hostPath suffix.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ci-inst01
+  namespace: runai-llm-team            # a Run:ai project namespace
+  labels:
+    project: llm-team
+  annotations:
+    gpu-fraction: "0.25"               # memory: 10 GiB on a 40 GiB A100, reported exactly
+    ci.gpu/sm-percent: "25"            # compute: 25% of SMs (~26 of 108)
+    ci.gpu/mps-ns: "ciinst01"
+spec:
+  schedulerName: runai-scheduler
+  runtimeClassName: nvidia-sysbox
+  hostUsers: false
+  containers:
+    - name: main
+      image: sysbox-ssh-kube-cpu-aware:24.04
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: INSTANCE_USER
+          value: ubuntu
+        - name: INSTANCE_PASSWORD
+          value: "changeme123"
+        # fractiond also injects CUDA_MPS_PIPE_DIRECTORY=/run/nvidia-mps; the image's
+        # entrypoint must export this value for user sessions instead.
+        - name: CI_MPS_PIPE_DIRECTORY
+          value: /run/ci-mps
+      ports:
+        - {name: ssh, containerPort: 22}
+      resources:
+        limits:
+          cpu: "2"
+          memory: "8Gi"
+      volumeMounts:
+        - {name: ci-mps, mountPath: /run/ci-mps}
+  volumes:
+    - name: ci-mps
+      hostPath:
+        path: /run/nvidia-mps/shared/ciinst01   # kubelet retries until gpu-sm-agent creates it
+        type: Directory

@@ -1,0 +1,93 @@
+# gpu-sm-agent: per-pod SM caps (MPS namespaces) on top of KAI GPU fractions.
+# Deploy:
+#   kubectl apply -f daemonset.yaml
+#   kubectl -n gpu-sm-agent create configmap gpu-sm-agent --from-file=agent.py \
+#     --dry-run=client -o yaml | kubectl apply -f -
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-sm-agent
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gpu-sm-agent
+  namespace: gpu-sm-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gpu-sm-agent
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gpu-sm-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gpu-sm-agent
+subjects:
+  - kind: ServiceAccount
+    name: gpu-sm-agent
+    namespace: gpu-sm-agent
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gpu-sm-agent
+  namespace: gpu-sm-agent
+spec:
+  selector:
+    matchLabels: {app: gpu-sm-agent}
+  template:
+    metadata:
+      labels: {app: gpu-sm-agent}
+    spec:
+      serviceAccountName: gpu-sm-agent
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      runtimeClassName: nvidia      # injects host nvidia-smi + nvidia-cuda-mps-control
+      hostPID: true                 # see / kill GPU processes, read /proc/<pid>/cgroup
+      priorityClassName: system-node-critical
+      containers:
+        - name: agent
+          image: nvcr.io/nvidia/pytorch:26.09-py3   # any image with python3 works
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-u", "/agent/agent.py"]
+          env:
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+            - name: MPS_CONTROL_PIPE
+              value: /run/nvidia-mps
+            - name: MPS_SERVER
+              value: shared
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            # containerd's default profile only allows signals to peers with the
+            # same profile; Sysbox containers are not under it, so kills get EPERM.
+            appArmorProfile:
+              type: Unconfined
+            capabilities:
+              drop: ["ALL"]
+              add: ["KILL", "DAC_OVERRIDE"]
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          volumeMounts:
+            - {name: code, mountPath: /agent}
+            - {name: mps, mountPath: /run/nvidia-mps}
+      volumes:
+        - name: code
+          configMap: {name: gpu-sm-agent}
+        - name: mps
+          hostPath: {path: /run/nvidia-mps, type: Directory}

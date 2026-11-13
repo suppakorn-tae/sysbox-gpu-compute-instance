@@ -1,0 +1,10 @@
+#!/bin/sh
+
+read -r quota period < /sys/fs/cgroup/cpu.max
+
+if [ "$quota" != "max" ] && [ "$period" -gt 0 ]; then
+    awk -v q="$quota" -v p="$period" \
+        'BEGIN { print int((q + p - 1) / p) }'
+else
+    exec /usr/bin/nproc "$@"
+fi
