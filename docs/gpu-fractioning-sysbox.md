@@ -299,7 +299,7 @@ A process that bypasses MPS runs for up to ~0.5–1 s (one tick plus the `nvidia
 
 ### 9.3 Not tested yet
 
-- Restart of KAI's `mpsd`: this drops all namespaces. The agent recreates them, but running pods keep a bind mount to the old directory and probably need a restart.
+- Restart of KAI's `mpsd`: **tested** (security-testing.md §6g) — drops all namespaces, the agent recreates them, running fraction pods need a restart. Also recovers a wedged MPS server.
 - The real `sysbox-ssh-kube-cpu-aware` (systemd) image under `nvidia-sysbox`. Its entrypoint must export `CUDA_MPS_PIPE_DIRECTORY=/run/ci-mps` for SSH sessions, replacing the value fractiond injects.
 - Multi-GPU nodes and MIG.
 - Static `sm-partition` (hard SM partitions in 2-SM chunks) instead of thread percentage.
