@@ -1,0 +1,20 @@
+# Default-deny for a Compute Instance tenant namespace: blocks all ingress and
+# all egress except cluster DNS. Apply one per tenant/project namespace.
+# Verified on dev03 (RKE2 + Canal): blocks east-west and internet egress,
+# DNS still resolves. Add explicit allow policies for any intended traffic
+# (e.g. multi-node training: allow pods with a shared label to talk).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  # namespace: <tenant-namespace>   # set per namespace
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}

@@ -16,6 +16,7 @@ metadata:
     ci.gpu/sm-percent: "25"            # compute: 25% of SMs (~26 of 108)
     ci.gpu/mps-ns: "ciinst01"
 spec:
+  automountServiceAccountToken: false   # tenants don't need API access
   schedulerName: runai-scheduler
   runtimeClassName: nvidia-sysbox
   hostUsers: false

@@ -223,6 +223,7 @@ spec:
 | `EXCLUSIVE_PROCESS` compute mode as an alternative | ❌ doesn't work: the MPS server only holds the GPU while it has clients, so a native process takes it when the GPU is idle |
 | Hiding `/dev/nvidia0` so native contexts can't be created | ❌ MPS clients need it too. `mknod` is blocked in the user namespace. |
 | Agent's `kill` got `EPERM` | containerd's default AppArmor profile only allows signals to peers with the same profile. Agent runs `appArmorProfile: Unconfined` (capabilities stay limited to `KILL`, `DAC_OVERRIDE`). |
+| A workload sets `ci.gpu/sm-percent` higher than its memory fraction (self-service compute) | agent clamps SM% to `ceil(mem/gpu_total*100)+slack`; see security-testing.md §6b |
 | NGC images run `/usr/local/bin/cudaCheck` from shell init, which opens a native context | killed by the agent (harmless). The Compute Instance image doesn't have it. |
 
 ---

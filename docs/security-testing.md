@@ -145,6 +145,59 @@ The following tests are planned; they have **not** been established as completed
 
 **Evidence / repro:** `testing/gpu-fractioning/mk-ci-pod.sh` to create two fraction pods, then from inside one: `CUDA_MPS_PIPE_DIRECTORY=/run/nvidia-mps nvidia-cuda-mps-control -p 3 namespace list`.
 
+**Update (2026-11-13, follow-up testing):** the mutating cross-tenant commands were tested — see §6 below. They are **blocked** by Sysbox's UID remapping, so finding #5 is read-only cross-tenant *visibility* (confidentiality), not integrity/availability.
+
+---
+
+### 6. Cross-Tenant MPS Control, Compute Bypass, and Isolation (GPU fractions)
+
+**Objective:** With two GPU-fraction tenants (`atk`, `vic`) co-scheduled on one A100, test whether one can modify another's slice, bypass its own compute cap, escape to the host, reach other pods, or exhaust shared resources. Setup as in §5. Each test states what was confirmed; the host was never put at risk (no reboot/escape primitives run).
+
+#### 6a. Mutating cross-tenant MPS control — **blocked**
+From `atk` (container root), attempts to `namespace set civic …`, `namespace delete civic`, `namespace create`, and `client terminate <victim pid>` against the shared MPS server all failed:
+
+```
+Error: Insufficient privileges for UID 3921281024. 'NAMESPACE SET' requires root.
+```
+
+MPS protocol 3 requires **real UID 0** for mutating control commands. Sysbox (`hostUsers: false`) maps container-root to a non-zero host UID (here 3921281024), so every mutating command is refused. The victim's namespace, limits, and GPU client were unchanged.
+
+> **Dependency:** this protection relies on `hostUsers: false`. A GPU pod run **without** user namespacing (container-root = host UID 0) would pass the UID check and *could* alter or delete other tenants' MPS namespaces. Compute Instances must keep `hostUsers: false`.
+
+So finding #5 downgrades to **read-only cross-tenant visibility**: a tenant can still *list* all namespaces, their memory/SM limits, and all GPU client PIDs (via its own namespace socket as well as the root socket — the namespace list is global to the shared server). This is inherent to KAI's single shared MPS server, not fixable from the pod spec (an emptyDir mounted over `/run/nvidia-mps` is overridden by fractiond's later NRI mount; tested). The isolation boundary for *untrusting* tenants is a **separate MPS server per tenant** (`server create --uid`) or a separate GPU/MIG — not a shared fraction.
+
+#### 6b. Compute-cap bypass via forged annotation — **was open, now patched**
+A pod requesting `gpu-fraction: "0.1"` (memory) but `ci.gpu/sm-percent: "100"` (compute) received **all 108 SMs** (97.6 TFLOPS) on 4 GiB. The `gpu-sm-agent` trusted the SM annotation as the cap, so any workload that could set it escaped its compute share.
+**Patch:** the agent now clamps the requested SM% to the memory fraction, `min(requested, ceil(mem/gpu_total*100) + SM_SLACK)` (slack default 5 pts), using the node's `nvidia.com/gpu.memory` label as the true physical total. After the patch the same pod was clamped to 15% → **16 SMs, 21.9 TFLOPS**. (It still needs admission control to stop a tenant *lowering* another pod's annotations, but a tenant can no longer grant itself more compute than its fraction.)
+
+#### 6c. Native-context compute bypass under contention — **caught by agent**
+With `vic` running, `atk` launched a GPU job with MPS disabled (`CUDA_MPS_PIPE_DIRECTORY=/nonexistent`) to grab all SMs. The agent killed it within one tick (`native GPU context (type C) bypassing MPS`); `vic` was unaffected.
+
+#### 6d. Container-to-host isolation (P2) — **holds**
+From `atk`: PID namespace isolated (5 visible PIDs, host MPS daemon not visible), seccomp active (filter mode 2). The container has a full capability set (`CapEff=000001ffffffffff`) but these are **namespaced** by Sysbox and don't act on the host — the Sysbox model. `/var/lib/rancher/{rke2,k3s}` appear inside but are Sysbox's **empty per-container** mounts (backed by `/var/lib/sysbox/rancher-*`), not host data (confirmed empty). Active escape primitives (`nsenter -t 1`, `modprobe`, `/proc/sysrq-trigger`) were **not** run, to protect the host.
+
+#### 6e. Resource limits beyond GPU memory (P3) — **CPU/RAM enforced, PID limit missing**
+A pod with `cpu: "1"`, `memory: 512Mi`:
+- `cpu.max = 100000 100000` → 4 busy threads throttled to **1.00 core**. ✅
+- `memory.max = 536870912` → an 800 MiB allocation was **OOM-killed** (exit 137). ✅
+- `pids.max = 57709` → **node default, no per-pod PID limit**. A fork bomb in one tenant could exhaust node PIDs and affect neighbors. (Fork bomb not run.) **Fix:** set kubelet `--pod-max-pids` (or a per-pod PID limit). ⚠️
+
+#### 6f. Network isolation (P1) — **open by default, patch provided**
+No `NetworkPolicy` exists in the tenant project namespace. From `atk`, confirmed reachable: another pod's listener (east-west, got a reply), cluster DNS, the API server, the **node's own SSH** (`<node-ip>:22`), and the **public internet** (`1.1.1.1:443`). The default ServiceAccount token is mounted but **low-privilege** (all API calls → 403).
+**Patch:** [`manifests/netpol-default-deny.yaml`](../manifests/netpol-default-deny.yaml) — default-deny ingress/egress with a DNS carve-out, one per tenant namespace. Verified on a throwaway namespace: east-west **blocked**, internet egress **blocked**, DNS still resolves. Plus `automountServiceAccountToken: false` on the pod ([`manifests/pod-gpu-fraction-sm.yaml`](../manifests/pod-gpu-fraction-sm.yaml)).
+
+---
+
+## Patches applied in this round
+
+| Finding | Patch | Verified |
+|---|---|---|
+| 6b compute-cap bypass via `sm-percent` | `gpu-sm-agent` clamps SM% to the memory fraction (uses node `nvidia.com/gpu.memory` label) | ✅ 100→15 % (16 SMs) |
+| 6f network wide-open | `manifests/netpol-default-deny.yaml` (default-deny + DNS); `automountServiceAccountToken: false` | ✅ east-west & egress blocked, DNS ok |
+| 5 cross-tenant MPS visibility | **Not fixable in pod spec**; documented. Use separate MPS server / GPU / MIG for untrusting tenants; report upstream to KAI | — |
+| 6e missing PID limit | Documented; set kubelet `--pod-max-pids` | — (not applied: kubelet change) |
+| 6a mutating MPS control | Already blocked by `hostUsers: false`; documented as a hard requirement | ✅ blocked |
+
 ---
 
 ## Current Summary
@@ -155,9 +208,14 @@ The following tests are planned; they have **not** been established as completed
 | Tailscale SSH and HTTP connectivity | Successfully tested through the configured Tailscale path |
 | Docker-in-Container | Verified working via standard installation under Sysbox |
 | Fail2ban systemd daemon | Configured and confirmed automatically active on boot |
-| MPS control-plane / GPU-fraction tenant isolation | **Cross-tenant visibility and shared-dir write confirmed** (KAI whole-tree mount); mutating cross-tenant control commands not yet tested |
+| MPS cross-tenant control (mutate another tenant) | **Blocked** by Sysbox UID remapping (needs `hostUsers: false`) |
+| MPS cross-tenant visibility (read others' limits/PIDs) | Confirmed, inherent to KAI's shared MPS server; use separate server/GPU/MIG for untrusting tenants |
+| GPU-fraction compute-cap bypass (`sm-percent` annotation) | Was open (got 108 SMs); **patched** — agent clamps SM% to memory fraction |
 | GPU-fraction memory cap (KAI memacct under Sysbox) | Stale/cross-pod limit observed, 6/56 pods; see gpu-fractioning-sysbox.md §9.1 |
 | GPU-fraction compute cap (gpu-sm-agent) | Enforced; native-context and wrong-namespace bypass killed by agent |
+| Container-to-host isolation (Sysbox) | Holds (namespaced caps, PID/mount isolation); escape primitives not run |
+| Network isolation (tenant namespace) | Open by default; **patched** — default-deny NetworkPolicy + DNS carve-out |
+| Per-pod PID limit | Missing (node default 57709); set kubelet `--pod-max-pids` |
 | Inter-pod network isolation | Planned (default-deny with opt-in communication) |
 | Container-to-host isolation | Planned |
 | CPU/RAM/PID/storage enforcement | Planned |

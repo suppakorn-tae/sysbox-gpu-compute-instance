@@ -22,6 +22,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]        # read nvidia.com/gpu.memory (physical GPU total)
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -26,7 +26,7 @@ Each tick the agent:
 Needs: hostPID, CAP_KILL, and an unconfined AppArmor profile (containerd's
 default profile blocks signals to Sysbox containers).
 """
-import json, os, re, signal, ssl, subprocess, sys, time, urllib.request
+import json, math, os, re, signal, ssl, subprocess, sys, time, urllib.request
 
 NODE = os.environ["NODE_NAME"]
 PIPE = os.environ.get("MPS_CONTROL_PIPE", "/run/nvidia-mps")
@@ -40,9 +40,33 @@ SA = "/var/run/secrets/kubernetes.io/serviceaccount"
 API = f"https://{os.environ['KUBERNETES_SERVICE_HOST']}:{os.environ['KUBERNETES_SERVICE_PORT']}"
 CTX = ssl.create_default_context(cafile=f"{SA}/ca.crt")
 
+# SM headroom allowed above the memory fraction, in percentage points. A pod's
+# compute share is clamped to ceil(mem_fraction*100)+SLACK so a workload cannot
+# request, say, sm-percent=100 on a 0.1 memory fraction and grab the whole GPU.
+SM_SLACK = int(os.environ.get("SM_SLACK_PCT", "5"))
+
 
 def log(**kw):
     print(json.dumps({"ts": time.strftime("%H:%M:%S"), **kw}), flush=True)
+
+
+def gpu_total_mib():
+    """Physical GPU memory in MiB, from the node's nvidia.com/gpu.memory label.
+
+    nvidia-smi inside the agent container can report a capped value (e.g. a
+    stale MPS pinned-memory limit), so the node label (set by GPU feature
+    discovery) is the reliable physical total.
+    """
+    token = open(f"{SA}/token").read()
+    req = urllib.request.Request(f"{API}/api/v1/nodes/{NODE}",
+                                 headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, context=CTX, timeout=5) as r:
+        labels = json.load(r)["metadata"]["labels"]
+    return int(labels["nvidia.com/gpu.memory"])
+
+
+GPU_TOTAL_MIB = None  # filled at startup
+CLAMP_LOGGED = {}     # pod ref -> last-logged clamped value (avoid per-tick spam)
 
 
 def mps(*args, check=True):
@@ -90,8 +114,17 @@ def desired(pods):
             # KAI has not bound the pod yet; wait so the namespace is never
             # created without its memory cap.
             continue
+        # Compute is coupled to the purchased memory fraction: the requested SM%
+        # is clamped so it cannot exceed the fraction (plus a little slack). This
+        # is the authority on the cap; the annotation can only ask for *less*.
+        sm_cap = min(100, math.ceil(mem / GPU_TOTAL_MIB * 100) + SM_SLACK)
+        eff = min(pct, sm_cap)
+        if eff < pct and CLAMP_LOGGED.get(ref) != eff:
+            log(event="clamp", pod=ref, requested=pct, allowed=eff,
+                reason=f"sm-percent capped to memory fraction ({mem}/{GPU_TOTAL_MIB} MiB)")
+            CLAMP_LOGGED[ref] = eff
         seen[ns] = ref
-        out[p["metadata"]["uid"].replace("-", "_")] = (ns, pct, ref, mem)
+        out[p["metadata"]["uid"].replace("-", "_")] = (ns, eff, ref, mem)
     return out
 
 
@@ -226,7 +259,10 @@ def enforce(want):
 
 
 def main():
-    log(event="start", node=NODE, server=SERVER, prefix=PREFIX, tick=TICK)
+    global GPU_TOTAL_MIB
+    GPU_TOTAL_MIB = gpu_total_mib()
+    log(event="start", node=NODE, server=SERVER, prefix=PREFIX, tick=TICK,
+        gpu_total_mib=GPU_TOTAL_MIB, sm_slack_pct=SM_SLACK)
     while True:
         try:
             want = desired(node_pods())
