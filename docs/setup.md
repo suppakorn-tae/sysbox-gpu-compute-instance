@@ -42,8 +42,8 @@ fork is installed next.
 Needs Docker with the buildx plugin on the node.
 
 ```bash
-git clone -b sysbox-sm-limit https://github.com/suppakorn-tae/gpu-fractioning
-cd gpu-fractioning
+git clone -b sysbox-sm-limit https://github.com/suppakorn-tae/kai-gpu-fractioning
+cd kai-gpu-fractioning
 hack/fork/build-local.sh v0.1.6-sm.3            # builds 4 images, imports into containerd
 helm upgrade -i gpu-fractioning operator/charts -n gpu-fractioning --create-namespace \
   -f <this repo>/node-setup/gpu-fractioning-values.yaml

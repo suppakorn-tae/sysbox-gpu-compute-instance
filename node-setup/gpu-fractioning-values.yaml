@@ -1,5 +1,5 @@
 # Helm values for the forked gpu-fractioning chart
-# (github.com/suppakorn-tae/gpu-fractioning, branch sysbox-sm-limit), used on dev03.
+# (github.com/suppakorn-tae/kai-gpu-fractioning, branch sysbox-sm-limit), used on dev03.
 #
 #   helm upgrade -i gpu-fractioning <fork>/operator/charts -n gpu-fractioning \
 #     -f node-setup/gpu-fractioning-values.yaml

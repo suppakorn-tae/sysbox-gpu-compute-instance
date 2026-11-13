@@ -27,7 +27,7 @@ ssh ubuntu@<instance>
 
 GPU fractions are scheduled by upstream [KAI-Scheduler](https://github.com/kai-scheduler/KAI-Scheduler)
 and enforced by a fork of its gpu-fractioning component:
-[suppakorn-tae/gpu-fractioning](https://github.com/suppakorn-tae/gpu-fractioning) (branch `sysbox-sm-limit`).
+[suppakorn-tae/kai-gpu-fractioning](https://github.com/suppakorn-tae/kai-gpu-fractioning) (branch `sysbox-sm-limit`).
 Why the fork is needed: [docs/gpu-fractioning.md](docs/gpu-fractioning.md).
 
 ## Quick start

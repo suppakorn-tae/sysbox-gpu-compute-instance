@@ -18,7 +18,7 @@ container). The fork detects and repairs it.
 
 ## The fork
 
-[suppakorn-tae/gpu-fractioning](https://github.com/suppakorn-tae/gpu-fractioning),
+[suppakorn-tae/kai-gpu-fractioning](https://github.com/suppakorn-tae/kai-gpu-fractioning),
 branch `sysbox-sm-limit`, based on upstream v0.1.6 (the version KAI v0.18.3
 pins). Both features are off by default; this repo's
 [Helm values](../node-setup/gpu-fractioning-values.yaml) turn them on.
